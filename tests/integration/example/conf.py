@@ -17,7 +17,7 @@
 import pathlib
 import sys
 
-project_dir = pathlib.Path(__file__).parents[1].resolve()
+project_dir = pathlib.Path(__file__).parents[3].resolve()
 sys.path.insert(0, str(project_dir.absolute()))
 
 project = "Mockumentation"
@@ -27,5 +27,5 @@ html_title = project
 html_theme = "furo"
 
 extensions = [
-    "hello_ext",
+    "sphinx_ubuntu_images",
 ]

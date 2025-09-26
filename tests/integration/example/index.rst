@@ -1,5 +1,6 @@
 
-Test doc
-========
+Ubuntu Images Test
+==================
 
-.. hello:: world
+.. ubuntu-images::
+   :empty: No Ubuntu images available at this time
