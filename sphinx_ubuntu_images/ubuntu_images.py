@@ -1,4 +1,6 @@
-"""The ``.. ubuntu-images`` directive is a custom directive to generate bulleted
+"""Sphinx extension providing the ubuntu-images directive.
+
+The ``.. ubuntu-images`` directive is a custom directive to generate bulleted
 download lists of supported Ubuntu distro images for specific release ranges,
 suffixes, image-types, and architectures.
 
@@ -101,13 +103,18 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import functools
+import hashlib
+import http.server
 import io
 import itertools
 import re
+import tempfile
 import time
 import typing as t
-from email.utils import parsedate
+from email.utils import formatdate, parsedate
 from html.parser import HTMLParser
+from pathlib import Path
+from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -121,7 +128,7 @@ from sphinx.util.typing import (
 
 
 def setup(app: Sphinx) -> ExtensionMetadata:
-    """Called by Sphinx to install the extension."""
+    """Install the extension in the Sphinx application."""
     app.add_directive("ubuntu-images", UbuntuImagesDirective)
 
     return {
@@ -132,9 +139,10 @@ def setup(app: Sphinx) -> ExtensionMetadata:
 
 
 def parse_set(s: str) -> set[str]:
-    """Splits a :class:`str` *s* containing a comma or space-separated list of
-    items and returns them as a :class:`set`. Intended for parsing various
-    options of :class:`UbuntuImagesDirective`. For example::
+    """Split a comma or space-separated string into a set.
+
+    Intended for parsing various options of :class:`UbuntuImagesDirective`.
+    For example::
 
         >>> sorted(parse_set('1,2,3,4'))
         ['1', '2', '3', '4']
@@ -147,12 +155,19 @@ def parse_set(s: str) -> set[str]:
 
 
 class UbuntuImagesDirective(SphinxDirective):
+    """Sphinx directive for generating Ubuntu image download lists.
+
+    Provides the ``.. ubuntu-images::`` directive to generate bulleted download
+    lists of supported Ubuntu distro images for specific release ranges,
+    suffixes, image-types, and architectures.
+    """
+
     option_spec = {
         "releases": str,
-        "lts-only": lambda s: True,
+        "lts-only": lambda _s: True,
         "image-types": parse_set,
         "archs": parse_set,
-        "suffix": lambda s: "" if s is None else str(s),
+        "suffix": lambda s: "" if s is None else str(s),  # pyright: ignore[reportUnnecessaryComparison]
         "matches": re.compile,
         "empty": str,
         # The following options are intended for testing / advanced purposes
@@ -163,6 +178,7 @@ class UbuntuImagesDirective(SphinxDirective):
     }
 
     def run(self) -> list[nodes.Node]:
+        """Execute the directive and return document nodes."""
         meta_release_url = self.options.get(
             "meta-release", "https://changelogs.ubuntu.com/meta-release"
         )
@@ -257,8 +273,10 @@ class Release(t.NamedTuple):
 
     @property
     def is_lts(self) -> bool:
-        """A :class:`bool` indicating whether the release is a :abbr:`LTS (Long
-        Term Service)` release or not.
+        """Indicate whether the release is an LTS release.
+
+        Returns a :class:`bool` indicating whether the release is a
+        :abbr:`LTS (Long Term Service)` release or not.
         """
         return self.version.endswith("LTS")
 
@@ -300,19 +318,25 @@ class Image(t.NamedTuple):
 
     def _parse_field(self, field: str) -> str:
         matched = image_re.match(self.name)
-        assert matched is not None
+        if matched is None:
+            msg = f"Invalid image name: {self.name}"
+            raise ValueError(msg)
         return matched.group(field) or ""
 
     @property
     def version(self) -> str:
-        """A :class:`str` of the version of Ubuntu within the image, for example
-        "24.04" or "23.10".
+        """Return the Ubuntu version within the image.
+
+        Returns a :class:`str` of the version of Ubuntu within the image, for
+        example "24.04" or "23.10".
         """
         return self._parse_field("version")
 
     @property
     def image_type(self) -> str:
-        """A :class:`str` indicating the type of image, for example
+        """Return the type of image.
+
+        Returns a :class:`str` indicating the type of image, for example
         "preinstalled-server" or "live-server".
         """
         return self._parse_field("image_type")
@@ -324,24 +348,31 @@ class Image(t.NamedTuple):
 
     @property
     def suffix(self) -> str:
-        """A :class:`str` containing the suffix of the image filename. This is
-        typically a blank string, or a plus-prefixed string. For example
-        "+raspi", "+visionfive".
+        """Return the suffix of the image filename.
+
+        Returns a :class:`str` containing the suffix of the image filename.
+        This is typically a blank string, or a plus-prefixed string. For
+        example "+raspi", "+visionfive".
         """
         return self._parse_field("suffix")
 
     @property
     def file_type(self) -> str:
-        """A :class:`str` containing the first part of the file's extension,
-        typically "img" or "iso".
+        """Return the first part of the file's extension.
+
+        Returns a :class:`str` containing the first part of the file's
+        extension, typically "img" or "iso".
         """
         return self._parse_field("file_type")
 
     @property
     def compression(self) -> str:
-        """A :class:`str` containing the last part of the file's extension, if
-        present, indicating the compression used on the image. A blank string
-        indicates no compression. For example "gz", "xz", or "zst".
+        """Return the compression type used on the image.
+
+        Returns a :class:`str` containing the last part of the file's
+        extension, if present, indicating the compression used on the image. A
+        blank string indicates no compression. For example "gz", "xz", or
+        "zst".
         """
         return self._parse_field("compression")
 
@@ -350,7 +381,9 @@ class Image(t.NamedTuple):
 def get_releases(
     urls: tuple[str] = ("https://changelogs.ubuntu.com/meta-release",),
 ) -> list[Release]:
-    """Given a meta-release *url*, return a :class:`list` of :class:`Release`
+    """Return a list of Release tuples for all Ubuntu releases.
+
+    Given meta-release *urls*, return a :class:`list` of :class:`Release`
     tuples corresponding to all Ubuntu releases. For example::
 
         >>> with _test_server(_make_releases()) as url:
@@ -361,10 +394,10 @@ def get_releases(
         Release(codename='warty', name='Warty Warthog', version='04.10',
         date=datetime.datetime(2004, 10, 20, 7, 28, 17), supported=False)
     """
-    releases = {}
+    releases: dict[str, Release] = {}
     for url in urls:
         with (
-            urlopen(url) as data,
+            urlopen(url) as data,  # noqa: S310
             io.TextIOWrapper(data, encoding="utf-8", errors="strict") as text,
         ):
             for release in meta_parser(text):
@@ -375,10 +408,13 @@ def get_releases(
 def filter_releases(
     releases: t.Sequence[Release],
     spec: str = "",
+    *,
     lts: bool | None = None,
     supported: bool | None = None,
 ) -> t.Sequence[Release]:
-    """Filters *releases*, a sequence of :class:`Release` tuples, according to
+    """Filter releases according to directive options.
+
+    Filter *releases*, a sequence of :class:`Release` tuples, according to
     the options specified in the ubuntu-images directive. See the documentation
     of :class:`UbuntuImageDirective` for a detailed description of these
     options. For example::
@@ -405,36 +441,47 @@ def filter_releases(
         the filtered result in the same order.
     """
     if spec:
-        rel_order = [release.codename for release in releases]
+        rel_order: list[str] = [release.codename for release in releases]
+        rel_order_set: set[str] = set(rel_order)
         rel_spec = {
             tuple(elem.split("-", 1)) if "-" in elem else (elem, elem)
             for elem in {elem.strip() for elem in spec.replace(",", " ").split()}
         }
-        rel_selected = []
+        rel_selected: list[str] = []
         for elem in rel_spec:
-            try:
-                i = 0 if elem[0] == "" else rel_order.index(elem[0])
-                j = len(rel_order) if elem[1] == "" else rel_order.index(elem[1])
-                rel_selected.extend(rel_order[i : j + 1])
-            except ValueError:
-                # Release name not found - skip this spec
+            # Skip non-existent releases gracefully
+            if elem[0] != "" and elem[0] not in rel_order_set:
                 continue
-        rel_map = {release.codename: release for release in releases}
-        result = [rel_map[rel] for rel in sorted(rel_selected, key=rel_order.index)]
+            if elem[1] != "" and elem[1] not in rel_order_set:
+                continue
+            i = 0 if elem[0] == "" else rel_order.index(elem[0])
+            j = len(rel_order) if elem[1] == "" else rel_order.index(elem[1])
+            rel_selected.extend(rel_order[i : j + 1])
+        rel_map: dict[str, Release] = {
+            release.codename: release for release in releases
+        }
+        result: list[Release] = [
+            rel_map[rel] for rel in sorted(rel_selected, key=rel_order.index)
+        ]
     else:
         result = list(releases)
-    result = [
+    return [
         rel
         for rel in result
         if (lts is None or rel.is_lts == lts)
         and (supported is None or rel.supported == supported)
     ]
-    return result
 
 
 @functools.lru_cache
-def get_images(url: str, supported: bool = True) -> list[Image]:
-    """Given the *url* of a cdimage directory containing images, returns a
+def get_images(
+    url: str,
+    *,
+    supported: bool = True,  # noqa: ARG001
+) -> list[Image]:
+    """Return a sequence of Image named tuples from a cdimage directory.
+
+    Given the *url* of a cdimage directory containing images, returns a
     sequence of :class:`Image` named tuples. For example::
 
         >>> images = {
@@ -459,7 +506,7 @@ def get_images(url: str, supported: bool = True) -> list[Image]:
     parser = TableParser()
     try:
         with (
-            urlopen(url) as data,
+            urlopen(url) as data,  # noqa: S310
             io.TextIOWrapper(data, encoding="utf-8", errors="strict") as page,
         ):
             parser.feed(page.read())
@@ -469,7 +516,7 @@ def get_images(url: str, supported: bool = True) -> list[Image]:
             f"unable to get {url}; are you sure the path is correct?"
         ) from None
     # Grab all the files in the directory
-    files = {}
+    files: dict[str, tuple[str, dt.date]] = {}
     for row in parser.table:
         try:
             _, name, date_str, _, _ = row
@@ -482,9 +529,9 @@ def get_images(url: str, supported: bool = True) -> list[Image]:
     if "SHA256SUMS" not in files:
         raise ValueError(f"SHA256SUMS file is missing from {url}")
     # Add SHA256 checksums and filter out anything that isn't an image
-    result = []
+    result: list[Image] = []
     with (
-        urlopen(url + "SHA256SUMS") as data,
+        urlopen(url + "SHA256SUMS") as data,  # noqa: S310
         io.TextIOWrapper(data, encoding="utf-8", errors="strict") as hashes,
     ):
         for line in hashes:
@@ -493,8 +540,8 @@ def get_images(url: str, supported: bool = True) -> list[Image]:
             if name.startswith("*"):
                 name = name[1:]
             try:
-                url, date = files[name]
-                image = Image(url, name, date, cksum)
+                image_url, image_date = files[name]
+                image = Image(image_url, name, image_date, cksum)
                 if image_re.match(image.name):
                     result.append(image)
             except (KeyError, ValueError):
@@ -509,7 +556,9 @@ def filter_images(
     suffix: str | None = None,
     matches: re.Pattern[str] | None = None,
 ) -> t.Sequence[Image]:
-    """Filters *images*, a sequence of :class:`Image` tuples, according to the
+    r"""Filter images according to directive options.
+
+    Filter *images*, a sequence of :class:`Image` tuples, according to the
     options specified in the ubuntu-images directive. See the documentation of
     :class:`UbuntuImageDirective` for a detailed description of these options.
     For example::
@@ -550,7 +599,9 @@ def filter_images(
 
 
 def meta_parser(file: t.TextIO) -> t.Iterable[Release]:
-    """Given a file-like object *file* which yields lines when iterated, yield
+    """Yield Release tuples from each stanza in a meta-release file.
+
+    Given a file-like object *file* which yields lines when iterated, yield
     :class:`Release` tuples from each successive stanza in the file.
 
     The expected source is https://changelogs.ubuntu.com/meta-release or any
@@ -559,8 +610,14 @@ def meta_parser(file: t.TextIO) -> t.Iterable[Release]:
     # I should use debian.deb822 for this ... but it's not packaged on PyPI
     # and this needs to run in an isolated venv, so that's out.
     # chain to guarantee our file ends with at least one blank line
-    for line in itertools.chain(file, ["\n"]):
-        line = line.strip()
+    codename: str | None = None
+    name: str | None = None
+    version: str | None = None
+    date: dt.datetime | None = None
+    supported: bool | None = None
+
+    for orig_line in itertools.chain(file, ["\n"]):
+        line = orig_line.strip()
         if line:
             field, value = line.split(":", 1)
             field = field.strip().lower()
@@ -585,13 +642,24 @@ def meta_parser(file: t.TextIO) -> t.Iterable[Release]:
                         time_tuple.tm_min,
                         time_tuple.tm_sec,
                     )
-        elif set(Release._fields) <= locals().keys():
-            yield Release(codename, name, version, date, supported)
-            del codename, name, version, date, supported
+        elif all(v is not None for v in (codename, name, version, date, supported)):
+            # Type narrowing for pyright - these are guaranteed to be non-None
+            # by the all() check above
+            if (
+                codename is not None
+                and name is not None
+                and version is not None
+                and date is not None
+                and supported is not None
+            ):
+                yield Release(codename, name, version, date, supported)
+            codename = name = version = date = supported = None
 
 
 class TableParser(HTMLParser):
-    """A sub-class of :class:`html.parser.HTMLParser` that finds all ``<table>``
+    """Parse HTML tables into lists of lists.
+
+    A sub-class of :class:`html.parser.HTMLParser` that finds all ``<table>``
     tags (indirectly) under the ``<html>`` tag.
 
     It stores the content of all ``<th>`` and ``<td>`` tags under each ``<tr>``
@@ -625,7 +693,12 @@ class TableParser(HTMLParser):
         self.state = "html"
         self.table: list[list[str]] = []
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],  # noqa: ARG002
+    ) -> None:
+        """Handle opening tags."""
         if self.state == "html" and tag == "table":
             self.state = "table"
         elif self.state == "table" and tag == "tr":
@@ -636,10 +709,12 @@ class TableParser(HTMLParser):
             self.table[-1].append("")
 
     def handle_data(self, data: str) -> None:
+        """Handle data between tags."""
         if self.state == "td":
             self.table[-1][-1] += data
 
     def handle_endtag(self, tag: str) -> None:
+        """Handle closing tags."""
         if self.state == "table" and tag == "table":
             self.state = "html"
         elif self.state == "tr" and tag == "tr":
@@ -655,12 +730,12 @@ class TableParser(HTMLParser):
 
 
 @contextlib.contextmanager
-def _test_server(
+def _test_server(  # pyright: ignore[reportUnusedFunction]
     files: dict[str, bytes], *, host: str = "127.0.0.1", port: int = 0
 ) -> t.Iterator[str]:
-    """This function provides a test HTTP server for the doctest suite.
+    """Provide a test HTTP server for the doctest suite.
 
-    It expects to be called with *content*, a :class:`dict` mapping filenames
+    Expects to be called with *content*, a :class:`dict` mapping filenames
     to byte-strings representing file contents. All contents will be written to
     a temporary directory, and a trivial HTTP server will be started to serve
     its content on the specified *host* and *port* (defaults to an ephemeral
@@ -670,21 +745,17 @@ def _test_server(
     temporary directory upon exit. The URL of the root of the server is yielded
     by the context manager.
     """
-    # pylint: disable=import-outside-toplevel, too-many-locals
-    # These imports are for the test-suite only
-    import http.server
-    import tempfile
-    from pathlib import Path
-    from threading import Thread
+    # pylint: disable=too-many-locals
 
     class SilentHandler(http.server.SimpleHTTPRequestHandler):
-        """Trivial derivative of SimpleHTTPRequestHandler that doesn't spam the
-        console with log messages.
+        """Trivial derivative of SimpleHTTPRequestHandler that doesn't spam the console.
+
+        This handler suppresses all log messages.
         """
 
         # pylint: disable=redefined-builtin
         # The super-class uses format here
-        def log_message(self, format: str, *args: t.Any) -> None:
+        def log_message(self, format: str, *args: t.Any) -> None:  # noqa: A002, ANN401
             pass
 
     with tempfile.TemporaryDirectory() as temp:
@@ -703,21 +774,17 @@ def _test_server(
             finally:
                 httpd.shutdown()
                 httpd_thread.join(timeout=5)
-                assert not httpd_thread.is_alive()
+                assert not httpd_thread.is_alive()  # noqa: S101
 
 
-def _make_sums(files: dict[str, bytes]) -> dict[str, bytes]:
-    """This function exists to generate SHA256SUMS files for the doctest suite.
+def _make_sums(files: dict[str, bytes]) -> dict[str, bytes]:  # pyright: ignore[reportUnusedFunction]
+    """Generate SHA256SUMS files for the doctest suite.
 
     Given *files*, a :class:`dict` mapping filenames to byte-strings of
     file contents, this function returns a new :class:`dict` which is a copy of
     *files* with one additional entry titled "SHA256SUMS" which contains the
     output of the "sha256sum" command for the given content.
     """
-    # pylint: disable=import-outside-toplevel
-    # These imports are for the test-suite only
-    import hashlib
-
     files = files.copy()
     files["SHA256SUMS"] = "\n".join(
         f"{hashlib.sha256(data).hexdigest()}  {filename}"
@@ -726,18 +793,14 @@ def _make_sums(files: dict[str, bytes]) -> dict[str, bytes]:
     return files
 
 
-def _make_releases() -> dict[str, bytes]:
-    # pylint: disable=import-outside-toplevel
-    # These imports are for the test-suite only
-    from email.utils import formatdate
-
+def _make_releases() -> dict[str, bytes]:  # pyright: ignore[reportUnusedFunction]
     releases = [
         ("Warty Warthog", "04.10", "2004-10-20T07:28:17Z", False),
         ("Disco Dingo", "19.04", "2019-04-18T19:04:00Z", False),
         ("Jammy Jellyfish", "22.04.5 LTS", "2022-04-21T22:04:00Z", True),
     ]
 
-    paras = []
+    paras: list[str] = []
     pre = "http://archive.ubuntu.com/ubuntu/dists"
     suf = "main/dist-upgrader-all/current"
     for name, version, date_str, supported in releases:
@@ -757,17 +820,16 @@ ReleaseNotesHtml: {pre}/{codename}-updates/{suf}/ReleaseAnnouncement.html
 UpgradeTool: {pre}/{codename}-updates/{suf}/{codename}.tar.gz
 UpgradeToolSignature: {pre}/{codename}-updates/{suf}/{codename}.tar.gz.gpg"""
         )
-    files = {
+    return {
         "meta-release": "\n".join(paras).strip().encode("utf-8"),
         "meta-release-development": b"",
     }
-    return files
 
 
-def _make_index(
+def _make_index(  # pyright: ignore[reportUnusedFunction]
     files: dict[str, bytes], timestamp: dt.datetime | None = None
 ) -> dict[str, bytes]:
-    """This function generates index.html files for the doctest suite.
+    """Generate index.html files for the doctest suite.
 
     Given *files*, a :class:`dict` mapping image filenames to byte-strings
     of file contents, this function generates an appropriate "index.html" file,
@@ -779,14 +841,14 @@ def _make_index(
     """
     if timestamp is None:
         timestamp = dt.datetime.now()
-    files = files.copy()
+    result = files.copy()
     rows = "\n".join(
         f"<tr><td>Icon</td><td>{filename}</td>"
         f"<td>{timestamp.strftime('%Y-%m-%d %H:%M')}</td>"
         f"<td>{len(data) // 1024}K</td><td>Descriptive text</td></tr>"
-        for filename, data in files.items()
+        for filename, data in result.items()
     )
-    files["index.html"] = f"""
+    result["index.html"] = f"""
     <html><body>
       <p>The following files are available:</p>
       <table>
@@ -795,7 +857,7 @@ def _make_index(
       </table>
     </body></html>
     """.encode()
-    return files
+    return result
 
 
 __test__ = {
@@ -1068,7 +1130,7 @@ if __name__ == "__main__":
     # Undecorate get_releases and get_images to prevent the cache from breaking
     # many tests (could use func.cache_clear but this hack is marginally
     # cleaner at least from the perspective of the tests themselves)
-    get_releases = get_releases.__wrapped__  # type: ignore
-    get_images = get_images.__wrapped__  # type: ignore
+    get_releases = get_releases.__wrapped__  # type: ignore[assignment, attr-defined]
+    get_images = get_images.__wrapped__  # type: ignore[assignment, attr-defined]
     failures, total = doctest.testmod()
     sys.exit(bool(failures))

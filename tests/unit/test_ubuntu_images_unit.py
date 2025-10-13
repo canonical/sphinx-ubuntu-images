@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from docutils import nodes
+from docutils.statemachine import StringList
 from sphinx_ubuntu_images.ubuntu_images import (
     Image,
     Release,
@@ -112,25 +113,25 @@ class TestFilterReleases:
         """Create sample releases for testing."""
         return [
             Release(
-                "warty",
-                "Warty Warthog",
-                "04.10",
-                dt.datetime(2004, 10, 20, 7, 28, 17),
-                False,
+                codename="warty",
+                name="Warty Warthog",
+                version="04.10",
+                date=dt.datetime(2004, 10, 20, 7, 28, 17),
+                supported=False,
             ),
             Release(
-                "disco",
-                "Disco Dingo",
-                "19.04",
-                dt.datetime(2019, 4, 18, 19, 4, 0),
-                False,
+                codename="disco",
+                name="Disco Dingo",
+                version="19.04",
+                date=dt.datetime(2019, 4, 18, 19, 4, 0),
+                supported=False,
             ),
             Release(
-                "jammy",
-                "Jammy Jellyfish",
-                "22.04.5 LTS",
-                dt.datetime(2022, 4, 21, 22, 4, 0),
-                True,
+                codename="jammy",
+                name="Jammy Jellyfish",
+                version="22.04.5 LTS",
+                date=dt.datetime(2022, 4, 21, 22, 4, 0),
+                supported=True,
             ),
         ]
 
@@ -171,7 +172,6 @@ class TestFilterImages:
     @pytest.fixture
     def sample_images(self):
         """Create sample images for testing."""
-        foo = b"foo" * 123456
         return [
             Image(
                 "http://example.com/ubuntu-24.04.1-live-server-riscv64.img.gz",
@@ -230,18 +230,17 @@ class TestUbuntuImagesDirective:
     @pytest.fixture
     def mock_directive(self):
         """Create a mock directive for testing."""
-        directive = UbuntuImagesDirective(
+        return UbuntuImagesDirective(
             name="ubuntu-images",
             arguments=[],
             options={},
-            content=[],
+            content=StringList([]),  # pyright: ignore[reportArgumentType]
             lineno=1,
             content_offset=0,
             block_text="",
             state=Mock(),
             state_machine=Mock(),
         )
-        return directive
 
     @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
     @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
