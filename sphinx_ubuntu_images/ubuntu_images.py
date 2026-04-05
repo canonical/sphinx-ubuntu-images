@@ -127,6 +127,7 @@ import typing as t
 from email.utils import formatdate, parsedate
 from html.parser import HTMLParser
 from pathlib import Path
+from textwrap import dedent
 from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -206,10 +207,10 @@ class UbuntuImagesDirective(SphinxDirective):
             "https://cdimage.ubuntu.com/releases/{release.codename}/release/",
         )
 
-        warnings = []
+        warnings: list[nodes.Node] = []
         if "suffix" in self.options:
             warnings.append(
-                document.reporter.warning(
+                document.reporter.warning(  # pyright: ignore[reportUnknownMemberType]
                     "the :suffix: option is deprecated in favour of the "
                     ":suffixes: option",
                     line=self.lineno,
@@ -217,13 +218,12 @@ class UbuntuImagesDirective(SphinxDirective):
             )
             if "suffixes" in self.options:
                 return [
-                    document.reporter.error(
+                    document.reporter.error(  # pyright: ignore[reportUnknownMemberType]
                         "cannot specify both :suffix: and :suffixes: options",
                         line=self.lineno,
                     )
                 ]
-            else:
-                self.options["suffixes"] = {self.options["suffix"]}
+            self.options["suffixes"] = {self.options["suffix"]}
         if "suffixes" in self.options:
             self.options["suffixes"] = {
                 "" if suffix == "-" else suffix
@@ -268,13 +268,13 @@ class UbuntuImagesDirective(SphinxDirective):
                 release_list.append(release_item)
         if empty:
             if "empty" in self.options:
-                return warnings + [nodes.emphasis("", self.options["empty"])]
+                return [*warnings, nodes.emphasis("", self.options["empty"])]
             return [
-                document.reporter.error(
+                document.reporter.error(  # pyright: ignore[reportUnknownMemberType]
                     "no images found for specified filters", line=self.lineno
                 )
             ]
-        return warnings + [release_list]
+        return [*warnings, release_list]
 
 
 # Copy doc-string from the module for the class
@@ -890,8 +890,6 @@ def _make_sums(files: dict[str, bytes]) -> dict[str, bytes]:  # pyright: ignore[
     *files* with one additional "SHA256SUMS" entry per directory found in
     *files*, containing the sha256sum output for all files in that directory.
     """
-    from pathlib import Path  # pylint: disable=import-outside-toplevel
-
     files = files.copy()
     paths = {f"{Path(filename).parent}/" for filename in files}
     if not paths or paths == {"./"}:
@@ -942,11 +940,10 @@ ReleaseNotesHtml: {pre}/{codename}-updates/{suf}/ReleaseAnnouncement.html
 UpgradeTool: {pre}/{codename}-updates/{suf}/{codename}.tar.gz
 UpgradeToolSignature: {pre}/{codename}-updates/{suf}/{codename}.tar.gz.gpg"""
         )
-    files = {
+    return {
         "meta-release": "\n".join(paras).strip().encode("utf-8"),
         "meta-release-development": b"",
     }
-    return files
 
 
 def _make_index(  # pyright: ignore[reportUnusedFunction]
@@ -963,9 +960,6 @@ def _make_index(  # pyright: ignore[reportUnusedFunction]
     last modification date, can be specified. It defaults to the current time
     if not given.
     """
-    from pathlib import Path  # pylint: disable=import-outside-toplevel
-    from textwrap import dedent  # pylint: disable=import-outside-toplevel
-
     files = files.copy()
     paths = {f"{Path(filename).parent}/" for filename in files}
     if not paths or paths == {"./"}:
