@@ -50,8 +50,8 @@ class TestRelease:
             codename="jammy",
             name="Jammy Jellyfish",
             version="22.04.5 LTS",
-            date=dt.datetime(2022, 4, 21, 22, 4, 0),
-            supported=True,
+            date=dt.datetime(2022, 4, 21, 22, 4, 0, tzinfo=dt.timezone.utc),
+            upgradable=True,
         )
         assert release.is_lts is True
 
@@ -61,10 +61,54 @@ class TestRelease:
             codename="disco",
             name="Disco Dingo",
             version="19.04",
-            date=dt.datetime(2019, 4, 18, 19, 4, 0),
-            supported=False,
+            date=dt.datetime(2019, 4, 18, 19, 4, 0, tzinfo=dt.timezone.utc),
+            upgradable=False,
         )
         assert release.is_lts is False
+
+    def test_version_yymm(self):
+        """Test version_yymm property."""
+        release = Release(
+            codename="jammy",
+            name="Jammy Jellyfish",
+            version="22.04.5 LTS",
+            date=dt.datetime(2022, 4, 21, 22, 4, 0, tzinfo=dt.timezone.utc),
+            upgradable=True,
+        )
+        assert release.version_yymm == "22.04"
+
+    def test_supported_upgradable(self):
+        """Test that an upgradable release is always supported."""
+        release = Release(
+            codename="jammy",
+            name="Jammy Jellyfish",
+            version="22.04.5 LTS",
+            date=dt.datetime(2022, 4, 21, 22, 4, 0, tzinfo=dt.timezone.utc),
+            upgradable=True,
+        )
+        assert release.supported is True
+
+    def test_supported_eol_interim(self):
+        """Test that an old interim release is not supported."""
+        release = Release(
+            codename="disco",
+            name="Disco Dingo",
+            version="19.04",
+            date=dt.datetime(2019, 4, 18, 19, 4, 0, tzinfo=dt.timezone.utc),
+            upgradable=False,
+        )
+        assert release.supported is False
+
+    def test_supported_recent_lts(self):
+        """Test that a recent LTS release (not yet upgradable) is still supported."""
+        release = Release(
+            codename="noble",
+            name="Noble Numbat",
+            version="24.04 LTS",
+            date=dt.datetime(2024, 4, 25, 0, 24, 4, tzinfo=dt.timezone.utc),
+            upgradable=False,
+        )
+        assert release.supported is True
 
 
 class TestImage:
@@ -116,22 +160,22 @@ class TestFilterReleases:
                 codename="warty",
                 name="Warty Warthog",
                 version="04.10",
-                date=dt.datetime(2004, 10, 20, 7, 28, 17),
-                supported=False,
+                date=dt.datetime(2004, 10, 20, 7, 28, 17, tzinfo=dt.timezone.utc),
+                upgradable=False,
             ),
             Release(
                 codename="disco",
                 name="Disco Dingo",
                 version="19.04",
-                date=dt.datetime(2019, 4, 18, 19, 4, 0),
-                supported=False,
+                date=dt.datetime(2019, 4, 18, 19, 4, 0, tzinfo=dt.timezone.utc),
+                upgradable=False,
             ),
             Release(
                 codename="jammy",
                 name="Jammy Jellyfish",
                 version="22.04.5 LTS",
-                date=dt.datetime(2022, 4, 21, 22, 4, 0),
-                supported=True,
+                date=dt.datetime(2022, 4, 21, 22, 4, 0, tzinfo=dt.timezone.utc),
+                upgradable=True,
             ),
         ]
 
@@ -140,6 +184,18 @@ class TestFilterReleases:
         result = filter_releases(sample_releases, spec="disco")
         assert len(result) == 1
         assert result[0].codename == "disco"
+
+    def test_filter_by_spec_numeric(self, sample_releases):
+        """Test filtering by numeric version spec."""
+        result = filter_releases(sample_releases, spec="19.04")
+        assert len(result) == 1
+        assert result[0].codename == "disco"
+
+    def test_filter_by_spec_numeric_range(self, sample_releases):
+        """Test filtering by numeric version range."""
+        result = filter_releases(sample_releases, spec="19.04-")
+        assert len(result) == 2
+        assert {r.codename for r in result} == {"disco", "jammy"}
 
     def test_filter_by_spec_multiple(self, sample_releases):
         """Test filtering by multiple release specs."""
@@ -162,6 +218,12 @@ class TestFilterReleases:
     def test_filter_by_supported(self, sample_releases):
         """Test filtering by supported status."""
         result = filter_releases(sample_releases, supported=True)
+        assert len(result) == 1
+        assert result[0].codename == "jammy"
+
+    def test_filter_by_upgradable(self, sample_releases):
+        """Test filtering by upgradable status."""
+        result = filter_releases(sample_releases, upgradable=True)
         assert len(result) == 1
         assert result[0].codename == "jammy"
 
@@ -206,16 +268,21 @@ class TestFilterImages:
         assert result[0].image_type == "live-server"
 
     def test_filter_by_suffix(self, sample_images):
-        """Test filtering by suffix."""
-        result = filter_images(sample_images, suffix="+raspi")
+        """Test filtering by suffix set."""
+        result = filter_images(sample_images, suffixes={"+raspi"})
         assert len(result) == 2
         assert all("+raspi" in image.name for image in result)
 
     def test_filter_by_empty_suffix(self, sample_images):
-        """Test filtering by empty suffix."""
-        result = filter_images(sample_images, suffix="")
+        """Test filtering by empty suffix (images with no suffix)."""
+        result = filter_images(sample_images, suffixes={""})
         assert len(result) == 1
         assert "+" not in result[0].name
+
+    def test_filter_by_multiple_suffixes(self, sample_images):
+        """Test filtering by multiple suffixes."""
+        result = filter_images(sample_images, suffixes={"+raspi", ""})
+        assert len(result) == 3
 
     def test_filter_by_regex(self, sample_images):
         """Test filtering by regex pattern."""
@@ -262,16 +329,66 @@ class TestUbuntuImagesDirective:
 
     @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
     @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
-    def test_run_with_no_matches_raises_error(
+    def test_run_with_no_matches_returns_error_node(
         self, mock_get_images, mock_get_releases, mock_directive
     ):
-        """Test directive execution with no matches raises ValueError."""
+        """Test directive execution with no matches returns an error node."""
         # Mock empty releases and images
         mock_get_releases.return_value = []
         mock_get_images.return_value = []
 
         # No empty option set
         mock_directive.options = {}
+        mock_directive.state.document.reporter.error = Mock(
+            return_value=nodes.system_message()
+        )
 
-        with pytest.raises(ValueError, match="no images found for specified filters"):
-            mock_directive.run()
+        result = mock_directive.run()
+        assert len(result) == 1
+        assert isinstance(result[0], nodes.system_message)
+        mock_directive.state.document.reporter.error.assert_called_once_with(
+            "no images found for specified filters", line=mock_directive.lineno
+        )
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_suffix_deprecated(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that :suffix: emits a deprecation warning."""
+        mock_get_releases.return_value = []
+        mock_get_images.return_value = []
+
+        mock_directive.options = {"suffix": "+raspi", "empty": ""}
+        mock_directive.state.document.reporter.warning = Mock(
+            return_value=nodes.system_message()
+        )
+
+        result = mock_directive.run()
+        mock_directive.state.document.reporter.warning.assert_called_once()
+        # Warning about deprecation should be included in result
+        assert any(isinstance(n, nodes.system_message) for n in result)
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_suffix_and_suffixes_error(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that specifying both :suffix: and :suffixes: returns an error."""
+        mock_get_releases.return_value = []
+        mock_get_images.return_value = []
+
+        mock_directive.options = {"suffix": "+raspi", "suffixes": {"+visionfive"}}
+        mock_directive.state.document.reporter.warning = Mock(
+            return_value=nodes.system_message()
+        )
+        mock_directive.state.document.reporter.error = Mock(
+            return_value=nodes.system_message()
+        )
+
+        result = mock_directive.run()
+        assert len(result) == 1
+        mock_directive.state.document.reporter.error.assert_called_once_with(
+            "cannot specify both :suffix: and :suffixes: options",
+            line=mock_directive.lineno,
+        )
