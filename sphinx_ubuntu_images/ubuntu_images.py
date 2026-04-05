@@ -226,8 +226,7 @@ class UbuntuImagesDirective(SphinxDirective):
             self.options["suffixes"] = {self.options["suffix"]}
         if "suffixes" in self.options:
             self.options["suffixes"] = {
-                "" if suffix == "-" else suffix
-                for suffix in self.options["suffixes"]
+                "" if suffix == "-" else suffix for suffix in self.options["suffixes"]
             }
 
         empty = True
@@ -975,7 +974,8 @@ def _make_index(  # pyright: ignore[reportUnusedFunction]
             for filename, data in files.items()
             if filename.startswith(path)
         )
-        files[f"{path}index.html"] = dedent("""
+        files[f"{path}index.html"] = (
+            dedent("""
         <html><body>
           <p>The following files are available:</p>
           <table>
@@ -985,7 +985,10 @@ def _make_index(  # pyright: ignore[reportUnusedFunction]
           {rows}
           </table>
         </body></html>
-        """).format(rows=rows).encode("utf-8")
+        """)
+            .format(rows=rows)
+            .encode("utf-8")
+        )
     return files
 
 
