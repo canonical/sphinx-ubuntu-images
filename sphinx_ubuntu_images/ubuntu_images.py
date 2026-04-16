@@ -8,8 +8,8 @@ The options that may be specified under the directive are as follows:
 
 ``:releases:`` *releases (list of ranges)*
     A comma or space-separated list of partial dash-delimited release ranges
-    (as release codenames). See below for examples. If unspecified, all
-    releases will be included.
+    (as release codenames or numbers). See below for examples. If unspecified,
+    all releases will be included.
 
 ``:lts-only:`` *(no value)*
     If specified, only LTS releases will be included in the output. Interim
@@ -26,11 +26,10 @@ The options that may be specified under the directive are as follows:
     Filter images by their architecture. The list may be comma or space
     separated. If unspecified, all architectures are included.
 
-``:suffix:`` *image +suffix (string)*
+``:suffixes:`` *image +suffixes (list of strings)*
     Filter images by their (plus-prefixed) suffix. If unspecified, any suffix
-    (including images with no suffix) will be included in the output. If
-    specified but blank, only images with no suffix will be included in the
-    output.
+    (including images with no suffix) will be included in the output. The
+    special value "-" may be given to indicate images with no suffix.
 
 ``:matches:`` *regular expression (string)*
     Filter images to those with filenames matching the specified regular
@@ -48,13 +47,27 @@ Examples of valid values for the ``:releases:`` option:
 jammy
     Just the 22.04 release
 
+22.04
+    Releases may also be specified numerically, but note that you must *not*
+    specify a point-release suffix (22.04 is acceptable, but 22.04.5 is not)
+
 jammy, noble
     Just the 22.04 and 24.04 releases
 
+jammy, 24.04
+    You can combine numeric and codename references, although this is
+    discouraged for the sake of clarity
+
 focal-noble
-    All releases from 20.04 to 24.04
+    All releases from 20.04 to 24.04, inclusive
+
+20.04-24.04
+    All releases from 20.04 to 24.04, inclusive
 
 jammy-
+    All releases from 22.04 onwards
+
+22.04-
     All releases from 22.04 onwards
 
 -noble
@@ -67,14 +80,14 @@ Examples of usage::
 
     All supported raspi images from jammy onwards
 
-    .. ubuntu-images:
-        :releases: jammy-
-        :suffix: +raspi
+    .. ubuntu-images::
+        :releases: 22.04-
+        :suffixes: +raspi
 
     All visionfive images
 
     .. ubuntu-images::
-        :suffix: +visionfive
+        :suffixes: +visionfive
 
     All supported LTS armhf and arm64 images
 
@@ -114,6 +127,7 @@ import typing as t
 from email.utils import formatdate, parsedate
 from html.parser import HTMLParser
 from pathlib import Path
+from textwrap import dedent
 from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -168,6 +182,7 @@ class UbuntuImagesDirective(SphinxDirective):
         "image-types": parse_set,
         "archs": parse_set,
         "suffix": lambda s: "" if s is None else str(s),  # pyright: ignore[reportUnnecessaryComparison]
+        "suffixes": parse_set,
         "matches": re.compile,
         "empty": str,
         # The following options are intended for testing / advanced purposes
@@ -179,6 +194,7 @@ class UbuntuImagesDirective(SphinxDirective):
 
     def run(self) -> list[nodes.Node]:
         """Execute the directive and return document nodes."""
+        document = self.state.document
         meta_release_url = self.options.get(
             "meta-release", "https://changelogs.ubuntu.com/meta-release"
         )
@@ -190,6 +206,28 @@ class UbuntuImagesDirective(SphinxDirective):
             "cdimage-template",
             "https://cdimage.ubuntu.com/releases/{release.codename}/release/",
         )
+
+        warnings: list[nodes.Node] = []
+        if "suffix" in self.options:
+            warnings.append(
+                document.reporter.warning(  # pyright: ignore[reportUnknownMemberType]
+                    "the :suffix: option is deprecated in favour of the "
+                    ":suffixes: option",
+                    line=self.lineno,
+                )
+            )
+            if "suffixes" in self.options:
+                return [
+                    document.reporter.error(  # pyright: ignore[reportUnknownMemberType]
+                        "cannot specify both :suffix: and :suffixes: options",
+                        line=self.lineno,
+                    )
+                ]
+            self.options["suffixes"] = {self.options["suffix"]}
+        if "suffixes" in self.options:
+            self.options["suffixes"] = {
+                "" if suffix == "-" else suffix for suffix in self.options["suffixes"]
+            }
 
         empty = True
         release_list = nodes.bullet_list()
@@ -213,7 +251,7 @@ class UbuntuImagesDirective(SphinxDirective):
                 ),
                 archs=self.options.get("archs"),
                 image_types=self.options.get("image-types"),
-                suffix=self.options.get("suffix"),
+                suffixes=self.options.get("suffixes"),
                 matches=self.options.get("matches"),
             )
             if images:
@@ -229,9 +267,13 @@ class UbuntuImagesDirective(SphinxDirective):
                 release_list.append(release_item)
         if empty:
             if "empty" in self.options:
-                return [nodes.emphasis("", self.options["empty"])]
-            raise ValueError("no images found for specified filters")
-        return [release_list]
+                return [*warnings, nodes.emphasis("", self.options["empty"])]
+            return [
+                document.reporter.error(  # pyright: ignore[reportUnknownMemberType]
+                    "no images found for specified filters", line=self.lineno
+                )
+            ]
+        return [*warnings, release_list]
 
 
 # Copy doc-string from the module for the class
@@ -255,21 +297,43 @@ class Release(t.NamedTuple):
         The version of the release. A string of the form "YY.MM.P" with an
         optional " LTS" suffix, e.g. '24.04.1 LTS'
 
+    .. attribute:: version_yymm
+
+        The :attr:`version` in the "canonical" form "YY.MM"
+
     .. attribute:: date
 
         A :class:`~datetime.datetime` indicating the timestamp of the release.
 
+    .. attribute:: upgradable
+
+        A :class:`bool` indicating whether upgrades to the release are
+        currently supported. This is drawn from the "supported" flag in the
+        meta-release data.
+
     .. attribute:: supported
 
         A :class:`bool` indicating whether the release is currently supported
-        or not.
+        or not. This is derived from the release :attr:`date`, the
+        :attr:`upgradable` status, and the :attr:`is_lts` attribute.
+
+        If a release is upgradable, it is de-facto supported. However, upgrades
+        for LTS releases are not enabled until the .1 release, so this is
+        insufficient to indicate support. In addition, if a release is within 9
+        months of its release date (for interim releases) or 5 years (for LTS
+        releases), it is supported.
     """
 
     codename: str
     name: str
     version: str
     date: dt.datetime
-    supported: bool
+    upgradable: bool
+
+    @property
+    def version_yymm(self) -> str:
+        """Return the version in YY.MM format."""
+        return self.version[:5]
 
     @property
     def is_lts(self) -> bool:
@@ -279,6 +343,30 @@ class Release(t.NamedTuple):
         :abbr:`LTS (Long Term Service)` release or not.
         """
         return self.version.endswith("LTS")
+
+    @property
+    def supported(self) -> bool:
+        """Indicate whether the release is currently supported.
+
+        Calculated from :attr:`upgradable`, :attr:`date`, and :attr:`is_lts`.
+        """
+        # Here we actually add 4 years and 11 months for LTS releases, and
+        # 8 months for interim. The omission of the final month is because the
+        # actual end of support *day* (in the final month) is relatively
+        # arbitrary. Rather than try and calculate that precisely, we omit the
+        # final month, and rely on the upgradable flag for it instead.
+        if self.is_lts:
+            month = self.date.month - 1
+            inc_year, month = divmod(month + 11, 12)
+            month += 1
+            eol = self.date.replace(year=self.date.year + 4 + inc_year, month=month)
+        else:
+            month = self.date.month - 1
+            inc_year, month = divmod(month + 8, 12)
+            month += 1
+            eol = self.date.replace(year=self.date.year + inc_year, month=month)
+        now = dt.datetime.now(tz=dt.timezone.utc)
+        return self.upgradable or (self.date <= now <= eol)
 
 
 image_re = re.compile(
@@ -389,10 +477,15 @@ def get_releases(
         >>> with _test_server(_make_releases()) as url:
         ...     releases = get_releases([url + 'meta-release'])
         >>> len(releases)
-        3
+        4
         >>> releases[0] # doctest: +NORMALIZE_WHITESPACE +ELLIPSIS
         Release(codename='warty', name='Warty Warthog', version='04.10',
-        date=datetime.datetime(2004, 10, 20, 7, 28, 17), supported=False)
+        date=datetime.datetime(2004, 10, 20, 7, 28, 17,
+        tzinfo=datetime.timezone.utc), upgradable=False)
+        >>> releases[3] # doctest: +NORMALIZE_WHITESPACE +ELLIPSIS
+        Release(codename='noble', name='Noble Numbat', version='24.04 LTS',
+        date=datetime.datetime(2024, 4, 25, 0, 24, 4,
+        tzinfo=datetime.timezone.utc), upgradable=False)
     """
     releases: dict[str, Release] = {}
     for url in urls:
@@ -411,6 +504,7 @@ def filter_releases(
     *,
     lts: bool | None = None,
     supported: bool | None = None,
+    upgradable: bool | None = None,
 ) -> t.Sequence[Release]:
     """Filter releases according to directive options.
 
@@ -422,16 +516,16 @@ def filter_releases(
         >>> with _test_server(_make_releases()) as url:
         ...     releases = get_releases([url + 'meta-release'])
         >>> [r.codename for r in releases]
-        ['warty', 'disco', 'jammy']
+        ['warty', 'disco', 'jammy', 'noble']
         >>> [r.codename for r in filter_releases(releases, spec='disco-')]
-        ['disco', 'jammy']
-        >>> [r.codename for r in filter_releases(releases, spec='disco')]
+        ['disco', 'jammy', 'noble']
+        >>> [r.codename for r in filter_releases(releases, spec='19.04')]
         ['disco']
         >>> [r.codename for r in filter_releases(releases, spec='warty,jammy')]
         ['warty', 'jammy']
-        >>> [r.codename for r in filter_releases(releases, supported=True)]
-        ['jammy']
         >>> [r.codename for r in filter_releases(releases, lts=True)]
+        ['jammy', 'noble']
+        >>> [r.codename for r in filter_releases(releases, upgradable=True)]
         ['jammy']
 
     .. note::
@@ -443,9 +537,16 @@ def filter_releases(
     if spec:
         rel_order: list[str] = [release.codename for release in releases]
         rel_order_set: set[str] = set(rel_order)
+        rel_name_map: dict[str, str] = {
+            release.version_yymm: release.codename for release in releases
+        }
         rel_spec = {
             tuple(elem.split("-", 1)) if "-" in elem else (elem, elem)
             for elem in {elem.strip() for elem in spec.replace(",", " ").split()}
+        }
+        rel_spec = {
+            (rel_name_map.get(start, start), rel_name_map.get(finish, finish))
+            for (start, finish) in rel_spec
         }
         rel_selected: list[str] = []
         for elem in rel_spec:
@@ -470,6 +571,7 @@ def filter_releases(
         for rel in result
         if (lts is None or rel.is_lts == lts)
         and (supported is None or rel.supported == supported)
+        and (upgradable is None or rel.upgradable == upgradable)
     ]
 
 
@@ -553,7 +655,7 @@ def filter_images(
     images: t.Sequence[Image],
     archs: set[str] | None = None,
     image_types: set[str] | None = None,
-    suffix: str | None = None,
+    suffixes: set[str] | None = None,
     matches: re.Pattern[str] | None = None,
 ) -> t.Sequence[Image]:
     r"""Filter images according to directive options.
@@ -578,11 +680,11 @@ def filter_images(
         >>> [i.name for i in filter_images(images,
         ... image_types={'preinstalled-desktop'})]
         ['ubuntu-24.04.1-preinstalled-desktop-arm64+raspi.img.xz']
-        >>> [i.name for i in filter_images(images, suffix='+unmatched')]
+        >>> [i.name for i in filter_images(images, suffixes={'+unmatched'})]
         ['ubuntu-24.04.1-preinstalled-server-riscv64+unmatched.img.xz']
-        >>> [i.name for i in filter_images(images, suffix='')]
+        >>> [i.name for i in filter_images(images, suffixes={''})]
         ['ubuntu-24.04.1-live-server-riscv64.img.gz']
-        >>> regex = re.compile(r'(24\\.04.*\\.gz|server.*\\+unmatched)')
+        >>> regex = re.compile(r'(24\.04.*\.gz|server.*\+unmatched)')
         >>> [i.name # doctest: +NORMALIZE_WHITESPACE
         ... for i in filter_images(images, matches=regex)]
         ['ubuntu-24.04.1-live-server-riscv64.img.gz',
@@ -593,7 +695,7 @@ def filter_images(
         for image in images
         if (archs is None or image.arch in archs)
         and (image_types is None or image.image_type in image_types)
-        and (suffix is None or image.suffix == suffix)
+        and (suffixes is None or image.suffix in suffixes)
         and (matches is None or matches.search(image.name))
     ]
 
@@ -614,7 +716,7 @@ def meta_parser(file: t.TextIO) -> t.Iterable[Release]:
     name: str | None = None
     version: str | None = None
     date: dt.datetime | None = None
-    supported: bool | None = None
+    upgradable: bool | None = None
 
     for orig_line in itertools.chain(file, ["\n"]):
         line = orig_line.strip()
@@ -629,7 +731,7 @@ def meta_parser(file: t.TextIO) -> t.Iterable[Release]:
             elif field == "version":
                 version = value
             elif field == "supported":
-                supported = bool(int(value))
+                upgradable = bool(int(value))
             elif field == "date":
                 parsed = parsedate(value)
                 if parsed is not None:
@@ -641,8 +743,9 @@ def meta_parser(file: t.TextIO) -> t.Iterable[Release]:
                         time_tuple.tm_hour,
                         time_tuple.tm_min,
                         time_tuple.tm_sec,
+                        tzinfo=dt.timezone.utc,
                     )
-        elif all(v is not None for v in (codename, name, version, date, supported)):
+        elif all(v is not None for v in (codename, name, version, date, upgradable)):
             # Type narrowing for pyright - these are guaranteed to be non-None
             # by the all() check above
             if (
@@ -650,10 +753,10 @@ def meta_parser(file: t.TextIO) -> t.Iterable[Release]:
                 and name is not None
                 and version is not None
                 and date is not None
-                and supported is not None
+                and upgradable is not None
             ):
-                yield Release(codename, name, version, date, supported)
-            codename = name = version = date = supported = None
+                yield Release(codename, name, version, date, upgradable)
+            codename = name = version = date = upgradable = None
 
 
 class TableParser(HTMLParser):
@@ -761,6 +864,7 @@ def _test_server(  # pyright: ignore[reportUnusedFunction]
     with tempfile.TemporaryDirectory() as temp:
         for filename, data in files.items():
             filepath = Path(temp) / filename
+            filepath.parent.mkdir(parents=True, exist_ok=True)
             filepath.write_bytes(data)
 
         handler = functools.partial(SilentHandler, directory=temp)
@@ -782,28 +886,43 @@ def _make_sums(files: dict[str, bytes]) -> dict[str, bytes]:  # pyright: ignore[
 
     Given *files*, a :class:`dict` mapping filenames to byte-strings of
     file contents, this function returns a new :class:`dict` which is a copy of
-    *files* with one additional entry titled "SHA256SUMS" which contains the
-    output of the "sha256sum" command for the given content.
+    *files* with one additional "SHA256SUMS" entry per directory found in
+    *files*, containing the sha256sum output for all files in that directory.
     """
     files = files.copy()
-    files["SHA256SUMS"] = "\n".join(
-        f"{hashlib.sha256(data).hexdigest()}  {filename}"
-        for filename, data in files.items()
-    ).encode("ascii")
+    paths = {f"{Path(filename).parent}/" for filename in files}
+    if not paths or paths == {"./"}:
+        paths = {""}
+
+    for path in paths:
+        files[f"{path}SHA256SUMS"] = "\n".join(
+            f"{hashlib.sha256(data).hexdigest()}  {Path(filename).name}"
+            for filename, data in files.items()
+            if filename.startswith(path)
+        ).encode("ascii")
     return files
 
 
 def _make_releases() -> dict[str, bytes]:  # pyright: ignore[reportUnusedFunction]
+    """Generate meta-release files for the doctest suite.
+
+    Returns a :class:`dict` mapping filenames to byte-strings of the file
+    contents. These files are designed to be roughly equivalent to those
+    found on https://changelogs.ubuntu.com/
+    """
     releases = [
         ("Warty Warthog", "04.10", "2004-10-20T07:28:17Z", False),
         ("Disco Dingo", "19.04", "2019-04-18T19:04:00Z", False),
         ("Jammy Jellyfish", "22.04.5 LTS", "2022-04-21T22:04:00Z", True),
+        # Noble has upgradable=False to test that it still counts as supported
+        # (case where an LTS is not yet upgradable before the first point-release)
+        ("Noble Numbat", "24.04 LTS", "2024-04-25T00:24:04Z", False),
     ]
 
     paras: list[str] = []
     pre = "http://archive.ubuntu.com/ubuntu/dists"
     suf = "main/dist-upgrader-all/current"
-    for name, version, date_str, supported in releases:
+    for name, version, date_str, upgradable in releases:
         codename = name.lower().split()[0]
         atime = dt.datetime.fromisoformat(date_str)
         paras.append(
@@ -812,7 +931,7 @@ Dist: {codename}
 Name: {name}
 Version: {version}
 Date: {formatdate(atime.timestamp())}
-Supported: {int(supported)}
+Supported: {int(upgradable)}
 Description: This is the {version} release
 Release-File: {pre}/{codename}-updates/Release
 ReleaseNotes: {pre}/{codename}-updates/{suf}/ReleaseAnnouncement
@@ -831,33 +950,46 @@ def _make_index(  # pyright: ignore[reportUnusedFunction]
 ) -> dict[str, bytes]:
     """Generate index.html files for the doctest suite.
 
-    Given *files*, a :class:`dict` mapping image filenames to byte-strings
-    of file contents, this function generates an appropriate "index.html" file,
-    returning a copy of the original :class:`dict` with this new entry.
+    Given *files*, a :class:`dict` mapping image filenames to byte-strings of
+    file contents, this function generates an appropriate "index.html" file
+    (per directory in *files*), returning a copy of the original :class:`dict`
+    with these new entries.
 
     Additionally *timestamp*, a :class:`~datetime.datetime` representing the
     last modification date, can be specified. It defaults to the current time
     if not given.
     """
+    files = files.copy()
+    paths = {f"{Path(filename).parent}/" for filename in files}
+    if not paths or paths == {"./"}:
+        paths = {""}
     if timestamp is None:
-        timestamp = dt.datetime.now()
-    result = files.copy()
-    rows = "\n".join(
-        f"<tr><td>Icon</td><td>{filename}</td>"
-        f"<td>{timestamp.strftime('%Y-%m-%d %H:%M')}</td>"
-        f"<td>{len(data) // 1024}K</td><td>Descriptive text</td></tr>"
-        for filename, data in result.items()
-    )
-    result["index.html"] = f"""
-    <html><body>
-      <p>The following files are available:</p>
-      <table>
-      <tr><th></th><th>Name</th><th>LastMod</th><th>Size</th><th>Desc</th></tr>
-      {rows}
-      </table>
-    </body></html>
-    """.encode()
-    return result
+        timestamp = dt.datetime.now(tz=dt.timezone.utc)
+
+    for path in paths:
+        rows = "\n".join(
+            f"<tr><td>Icon</td><td>{Path(filename).name}</td>"
+            f"<td>{timestamp.strftime('%Y-%m-%d %H:%M')}</td>"
+            f"<td>{len(data) // 1024}K</td><td>Descriptive text</td></tr>"
+            for filename, data in files.items()
+            if filename.startswith(path)
+        )
+        files[f"{path}index.html"] = (
+            dedent("""
+        <html><body>
+          <p>The following files are available:</p>
+          <table>
+          <tr>
+          <th></th><th>Name</th><th>LastMod</th><th>Size</th><th>Desc</th>
+          </tr>
+          {rows}
+          </table>
+        </body></html>
+        """)
+            .format(rows=rows)
+            .encode("utf-8")
+        )
+    return files
 
 
 __test__ = {
@@ -865,13 +997,17 @@ __test__ = {
     Ensure calculated Release properties operate as expected::
 
         >>> noble = Release('noble', 'Noble Numbat', '24.04.1 LTS',
-        ... dt.datetime(2024, 8, 29, 12, 0, 0), 1)
+        ... dt.datetime(2024, 8, 29, 12, 0, 0, tzinfo=dt.timezone.utc), False)
         >>> dingo = Release('dingo', 'Disco Dingo', '19.04',
-        ... dt.datetime(2019, 4, 15, 12, 0, 0), 0)
+        ... dt.datetime(2019, 4, 15, 12, 0, 0, tzinfo=dt.timezone.utc), False)
         >>> noble.is_lts
         True
         >>> dingo.is_lts
         False
+        >>> noble.version_yymm
+        '24.04'
+        >>> dingo.version_yymm
+        '19.04'
 
     Ensure calculated Image properties operate as expected::
 
@@ -992,12 +1128,15 @@ __test__ = {
         >>> from pathlib import Path
         >>> ts = dt.datetime(2021, 10, 25)
         >>> foo = b'foo' * 123456
+        >>> jammy = 'jammy/ubuntu-22.04.5'
+        >>> noble = 'noble/ubuntu-24.04'
         >>> images = {
-        ... 'ubuntu-22.04.5-live-server-riscv64.img.gz': foo,
-        ... 'ubuntu-22.04.5-preinstalled-server-armhf+raspi.img.xz': foo,
-        ... 'ubuntu-22.04.5-preinstalled-server-arm64+raspi.img.xz': foo,
-        ... 'ubuntu-22.04.5-preinstalled-server-riscv64+unmatched.img.xz': foo,
-        ... 'ubuntu-22.04.5-preinstalled-desktop-arm64+raspi.img.xz': foo,
+        ... f'{jammy}-live-server-riscv64.img.gz': foo,
+        ... f'{jammy}-preinstalled-server-armhf+raspi.img.xz': foo,
+        ... f'{jammy}-preinstalled-server-arm64+raspi.img.xz': foo,
+        ... f'{jammy}-preinstalled-server-riscv64+unmatched.img.xz': foo,
+        ... f'{jammy}-preinstalled-desktop-arm64+raspi.img.xz': foo,
+        ... f'{noble}-preinstalled-server-arm64+raspi.img.xz': foo,
         ... }
         >>> files = _make_index(_make_sums(images), ts) | _make_releases()
         >>> tmp_dir = tempfile.TemporaryDirectory()
@@ -1015,7 +1154,7 @@ __test__ = {
         ...         :image-types: preinstalled-server
         ...         :meta-release: {url}meta-release
         ...         :meta-release-development: {url}meta-release-development
-        ...         :cdimage-template: {url}
+        ...         :cdimage-template: {url}{{release.codename}}/
         ...     ''')
         ...     app = Sphinx(
         ...         srcdir=tmp / 'src', confdir=None,
@@ -1031,6 +1170,12 @@ __test__ = {
         <html...>
         ...
         <ul>
+        <li><p>Ubuntu 24.04 LTS (Noble Numbat) images:</p>
+        <ul>
+        <li><a class="reference download external" download=""
+        href="...">ubuntu-24.04-preinstalled-server-arm64+raspi...</a></li>
+        </ul>
+        </li>
         <li><p>Ubuntu 22.04.5 LTS (Jammy Jellyfish) images:</p>
         <ul>
         <li><a class="reference download external" download=""
@@ -1096,11 +1241,12 @@ __test__ = {
         >>> files = _make_releases()
         >>> tmp_dir = tempfile.TemporaryDirectory()
         >>> tmp = Path(tmp_dir.name)
+        >>> warning = tmp / 'warnings.txt'
         >>> with tmp_dir, _test_server(files) as url:
         ...     (tmp / 'src').mkdir()
         ...     (tmp / 'build').mkdir()
         ...     (tmp / 'tree').mkdir()
-        ...     _ = (tmp / 'src' / 'index.rst').write_text(f'''\
+        ...     _ = (tmp / 'src' / 'index.rst').write_text(f'''\\
         ...     Download one of the supported images:
         ...
         ...     .. ubuntu-images::
@@ -1109,16 +1255,19 @@ __test__ = {
         ...         :meta-release-development: {url}meta-release-development
         ...         :cdimage-template: {url}{{release.codename}}
         ...     ''')
-        ...     app = Sphinx(
-        ...         srcdir=tmp / 'src', confdir=None,
-        ...         outdir=tmp / 'build', doctreedir=tmp / 'tree',
-        ...         buildername='html', status=None, warning=None)
-        ...     _ = setup(app)
-        ...     app.build()
-        Traceback (most recent call last):
-          File ".../ubuntu-images/__init__.py", line 207, in run
-            raise ValueError('no images found for specified filters')
-        ValueError: no images found for specified filters
+        ...     with warning.open('w') as f:
+        ...         app = Sphinx(
+        ...             srcdir=tmp / 'src', confdir=None,
+        ...             outdir=tmp / 'build', doctreedir=tmp / 'tree',
+        ...             buildername='html', status=None, warning=f)
+        ...         _ = setup(app)
+        ...         app.build()
+        ...     print(
+        ...         # Strip ANSI color codes
+        ...         re.sub(r'\\x1b\\[[0-9;]+m', '', warning.read_text())
+        ...     ) # doctest: +NORMALIZE_WHITESPACE +ELLIPSIS
+        /.../index.rst:3: ERROR: no images found for specified filters...
+        <BLANKLINE>
     """,
 }
 
