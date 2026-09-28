@@ -2,7 +2,7 @@
 
 The ``.. ubuntu-images`` directive is a custom directive to generate bulleted
 download lists of supported Ubuntu distro images for specific release ranges,
-suffixes, image-types, and architectures.
+flavors, suffixes, image-types, and architectures.
 
 The options that may be specified under the directive are as follows:
 
@@ -10,6 +10,21 @@ The options that may be specified under the directive are as follows:
     A comma or space-separated list of partial dash-delimited release ranges
     (as release codenames or numbers). See below for examples. If unspecified,
     all releases will be included.
+
+``:flavor:`` *flavor (string)*
+    The flavor of Ubuntu images to list, e.g. ``xubuntu``, ``kubuntu``, or
+    ``lubuntu``. Defaults to ``ubuntu`` (the "vanilla" flavor). Images are
+    sourced from the equivalent flavor directory under https://cdimage.ubuntu.com
+    (e.g. ``https://cdimage.ubuntu.com/xubuntu/releases/...``), and only
+    filenames with a matching prefix (e.g. ``xubuntu-26.04-minimal-amd64.iso``)
+    are included. The flavor name is also used in the heading of each
+    release entry.
+
+    Releases missing from the flavor's releases directory are skipped, as
+    flavors publish only a subset of the mainline releases. Note, however,
+    that release support data follows mainline Ubuntu, whose LTS time-frames
+    (and ESM) outlast those of most flavors; an explicit ``:releases:``
+    range may therefore be appropriate.
 
 ``:lts-only:`` *(no value)*
     If specified, only LTS releases will be included in the output. Interim
@@ -89,6 +104,13 @@ Examples of usage::
     .. ubuntu-images::
         :suffixes: +visionfive
 
+    All Xubuntu minimal desktop images from resolute onwards
+
+    .. ubuntu-images::
+        :flavor: xubuntu
+        :releases: resolute-
+        :image-types: minimal
+
     All supported LTS armhf and arm64 images
 
     .. ubuntu-images::
@@ -126,6 +148,7 @@ import time
 import typing as t
 from email.utils import formatdate, parsedate
 from html.parser import HTMLParser
+from http import HTTPStatus
 from pathlib import Path
 from textwrap import dedent
 from threading import Thread
@@ -168,16 +191,34 @@ def parse_set(s: str) -> set[str]:
     return {elem.strip() for elem in s.replace(",", " ").split()}
 
 
+flavor_titles = {
+    "edubuntu": "Edubuntu",
+    "kubuntu": "Kubuntu",
+    "lubuntu": "Lubuntu",
+    "mythbuntu": "Mythbuntu",
+    "ubuntu": "Ubuntu",
+    "ubuntu-budgie": "Ubuntu Budgie",
+    "ubuntu-gnome": "Ubuntu GNOME",
+    "ubuntu-mate": "Ubuntu MATE",
+    "ubuntu-unity": "Ubuntu Unity",
+    "ubuntucinnamon": "Ubuntu Cinnamon",
+    "ubuntukylin": "Ubuntu Kylin",
+    "ubuntustudio": "Ubuntu Studio",
+    "xubuntu": "Xubuntu",
+}
+
+
 class UbuntuImagesDirective(SphinxDirective):
     """Sphinx directive for generating Ubuntu image download lists.
 
     Provides the ``.. ubuntu-images::`` directive to generate bulleted download
     lists of supported Ubuntu distro images for specific release ranges,
-    suffixes, image-types, and architectures.
+    flavors, suffixes, image-types, and architectures.
     """
 
     option_spec = {
         "releases": str,
+        "flavor": lambda s: "" if s is None else s.strip().lower(),  # pyright: ignore[reportUnnecessaryComparison]
         "lts-only": lambda _s: True,
         "image-types": parse_set,
         "archs": parse_set,
@@ -202,10 +243,15 @@ class UbuntuImagesDirective(SphinxDirective):
             "meta-release-development",
             "https://changelogs.ubuntu.com/meta-release-development",
         )
-        cdimage_template = self.options.get(
-            "cdimage-template",
-            "https://cdimage.ubuntu.com/releases/{release.codename}/release/",
-        )
+        flavor = self.options.get("flavor") or "ubuntu"
+        if "cdimage-template" in self.options:
+            cdimage_template = self.options["cdimage-template"]
+        else:
+            cdimage_template = (
+                "https://cdimage.ubuntu.com/releases/"
+                if flavor == "ubuntu"
+                else f"https://cdimage.ubuntu.com/{flavor}/releases/"
+            ) + "{release.codename}/release/"
 
         warnings: list[nodes.Node] = []
         if "suffix" in self.options:
@@ -237,21 +283,32 @@ class UbuntuImagesDirective(SphinxDirective):
             lts=self.options.get("lts-only"),
             supported=True,
         )
+        flavor_title = flavor_titles.get(flavor, flavor.replace("-", " ").title())
+        # Flavors only publish a subset of the mainline releases, so missing
+        # release directories are tolerated on flavor-derived cdimage URLs
+        missing_ok = flavor != "ubuntu" and "cdimage-template" not in self.options
         for release in reversed(releases):
             release_item = nodes.list_item(
                 "",
                 nodes.paragraph(
-                    text=f"Ubuntu {release.version} ({release.name}) images:"
+                    text=f"{flavor_title} {release.version} ({release.name}) images:"
                 ),
             )
-            images = filter_images(
-                get_images(
+            try:
+                release_images = get_images(
                     url=cdimage_template.format(release=release),
                     supported=release.supported,
-                ),
+                )
+            except ImagesNotFoundError:
+                if not missing_ok:
+                    raise
+                continue
+            images = filter_images(
+                release_images,
                 archs=self.options.get("archs"),
                 image_types=self.options.get("image-types"),
                 suffixes=self.options.get("suffixes"),
+                flavors={flavor},
                 matches=self.options.get("matches"),
             )
             if images:
@@ -370,7 +427,7 @@ class Release(t.NamedTuple):
 
 
 image_re = re.compile(
-    r"^ubuntu-(?P<version>[\d.]+)"
+    r"^(?P<flavor>[a-z][a-z0-9-]*?)-(?P<version>[\d.]+)"
     r"-(?P<image_type>[^+.]*)"
     r"-(?P<arch>[^-+.]+)"
     r"(?P<suffix>\+.*)?"
@@ -410,6 +467,16 @@ class Image(t.NamedTuple):
             msg = f"Invalid image name: {self.name}"
             raise ValueError(msg)
         return matched.group(field) or ""
+
+    @property
+    def flavor(self) -> str:
+        """Return the Ubuntu flavor of the image.
+
+        Returns a :class:`str` indicating the Ubuntu flavor of the image, i.e.
+        the prefix of the filename before the version, for example "ubuntu",
+        "xubuntu", or "ubuntu-mate".
+        """
+        return self._parse_field("flavor")
 
     @property
     def version(self) -> str:
@@ -575,6 +642,10 @@ def filter_releases(
     ]
 
 
+class ImagesNotFoundError(ValueError):
+    """Raised when a cdimage directory does not exist on the server."""
+
+
 @functools.lru_cache
 def get_images(
     url: str,
@@ -612,11 +683,12 @@ def get_images(
             io.TextIOWrapper(data, encoding="utf-8", errors="strict") as page,
         ):
             parser.feed(page.read())
-    except HTTPError:
+    except HTTPError as exc:
         # Supported releases should *always* have images
-        raise ValueError(
-            f"unable to get {url}; are you sure the path is correct?"
-        ) from None
+        msg = f"unable to get {url}; are you sure the path is correct?"
+        if exc.code == HTTPStatus.NOT_FOUND:
+            raise ImagesNotFoundError(msg) from None
+        raise ValueError(msg) from None
     # Grab all the files in the directory
     files: dict[str, tuple[str, dt.date]] = {}
     for row in parser.table:
@@ -656,6 +728,7 @@ def filter_images(
     archs: set[str] | None = None,
     image_types: set[str] | None = None,
     suffixes: set[str] | None = None,
+    flavors: set[str] | None = None,
     matches: re.Pattern[str] | None = None,
 ) -> t.Sequence[Image]:
     r"""Filter images according to directive options.
@@ -684,6 +757,10 @@ def filter_images(
         ['ubuntu-24.04.1-preinstalled-server-riscv64+unmatched.img.xz']
         >>> [i.name for i in filter_images(images, suffixes={''})]
         ['ubuntu-24.04.1-live-server-riscv64.img.gz']
+        >>> [i.name for i in filter_images(images, flavors={'xubuntu'})]
+        []
+        >>> len(list(filter_images(images, flavors={'ubuntu'})))
+        5
         >>> regex = re.compile(r'(24\.04.*\.gz|server.*\+unmatched)')
         >>> [i.name # doctest: +NORMALIZE_WHITESPACE
         ... for i in filter_images(images, matches=regex)]
@@ -696,6 +773,7 @@ def filter_images(
         if (archs is None or image.arch in archs)
         and (image_types is None or image.image_type in image_types)
         and (suffixes is None or image.suffix in suffixes)
+        and (flavors is None or image.flavor in flavors)
         and (matches is None or matches.search(image.name))
     ]
 
@@ -1045,6 +1123,22 @@ __test__ = {
         'iso'
         >>> arm_img.compression
         ''
+        >>> xub_img = Image(
+        ... 'http://cdimage.ubuntu.com/xubuntu/releases/resolute/release/'
+        ... 'xubuntu-26.04.1-minimal-riscv64.iso',
+        ... 'xubuntu-26.04.1-minimal-riscv64.iso',
+        ... dt.datetime(2026, 8, 26, 23, 40, 0),
+        ... '2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886c678605d1b7f')
+        >>> pi_img.flavor
+        'ubuntu'
+        >>> xub_img.flavor
+        'xubuntu'
+        >>> xub_img.version
+        '26.04.1'
+        >>> xub_img.image_type
+        'minimal'
+        >>> xub_img.arch
+        'riscv64'
     """,
     "bad-url": """
     The URL provided to get_entry must be valid::
@@ -1060,8 +1154,8 @@ __test__ = {
           File "<stdin>", line 5, in <module>
             get_images(wrong_url) # doctest: +ELLIPSIS
           File ".../downloads.py", line 370, in get_images
-            raise ValueError(...)
-        ValueError: unable to get http://...; are you sure the path is correct?
+            raise ImagesNotFoundError(...)
+        ImagesNotFoundError: unable to get http://...; are you sure the path is correct?
     """,
     "no-checksums": """
     The SHA256SUMS file must exist on the server::
@@ -1268,6 +1362,64 @@ __test__ = {
         ...     ) # doctest: +NORMALIZE_WHITESPACE +ELLIPSIS
         /.../index.rst:3: ERROR: no images found for specified filters...
         <BLANKLINE>
+    """,
+    "flavor-option": """
+    Check that the ``:flavor:`` option restricts images to those with a
+    matching filename prefix, and uses the flavor name in the output
+    heading::
+
+        >>> import tempfile
+        >>> from pathlib import Path
+        >>> ts = dt.datetime(2021, 10, 25)
+        >>> foo = b'foo' * 123456
+        >>> noble = 'noble'
+        >>> images = {
+        ... f'{noble}/ubuntu-24.04-desktop-amd64.iso': foo,
+        ... f'{noble}/xubuntu-24.04-desktop-amd64.iso': foo,
+        ... f'{noble}/xubuntu-24.04-minimal-amd64.iso': foo,
+        ... }
+        >>> files = _make_index(_make_sums(images), ts) | _make_releases()
+        >>> tmp_dir = tempfile.TemporaryDirectory()
+        >>> tmp = Path(tmp_dir.name)
+        >>> with tmp_dir, _test_server(files) as url:
+        ...     (tmp / 'src').mkdir()
+        ...     (tmp / 'build').mkdir()
+        ...     (tmp / 'tree').mkdir()
+        ...     _ = (tmp / 'src' / 'index.rst').write_text(f'''\\
+        ...     Download one of the supported images:
+        ...
+        ...     .. ubuntu-images::
+        ...         :flavor: xubuntu
+        ...         :releases: noble
+        ...         :meta-release: {url}meta-release
+        ...         :meta-release-development: {url}meta-release-development
+        ...         :cdimage-template: {url}{{release.codename}}/
+        ...     ''')
+        ...     app = Sphinx(
+        ...         srcdir=tmp / 'src', confdir=None,
+        ...         outdir=tmp / 'build', doctreedir=tmp / 'tree',
+        ...         buildername='html', status=None, warning=None)
+        ...     _ = setup(app)
+        ...     app.build()
+        ...     print(
+        ...         (tmp / 'build' / 'index.html').read_text()
+        ...     ) # doctest: +NORMALIZE_WHITESPACE +ELLIPSIS
+        <!DOCTYPE html>
+        <BLANKLINE>
+        <html...>
+        ...
+        <ul>
+        <li><p>Xubuntu 24.04 LTS (Noble Numbat) images:</p>
+        <ul>
+        <li><a class="reference download external" download=""
+        href="...">xubuntu-24.04-desktop-amd64.iso</a></li>
+        <li><a class="reference download external" download=""
+        href="...">xubuntu-24.04-minimal-amd64.iso</a></li>
+        </ul>
+        </li>
+        </ul>
+        ...
+        </html>
     """,
 }
 

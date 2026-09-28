@@ -45,12 +45,30 @@ Examples of valid release values:
    :image-types: preinstalled-server
 ```
 
-#### Filter by suffix
+#### Filter by suffixes
 
 ```rst
 .. ubuntu-images::
-   :suffix: +raspi
+   :suffixes: +raspi
 ```
+
+The special value `-` matches images with no suffix.
+
+#### Choose the flavor
+
+```rst
+.. ubuntu-images::
+   :flavor: xubuntu
+```
+
+Images for flavors other than the default `ubuntu` are fetched from the
+flavor's own directory on cdimage.ubuntu.com (e.g.
+`https://cdimage.ubuntu.com/xubuntu/releases/...`), and only filenames with
+a matching prefix are included.
+
+Releases the flavor never published are skipped. Note that support data
+follows mainline Ubuntu, whose LTS time-frames (and ESM) outlast those of
+most flavors, so consider an explicit `:releases:` range.
 
 #### LTS releases only
 
@@ -73,7 +91,7 @@ All supported raspi images from jammy onwards:
 ```rst
 .. ubuntu-images::
    :releases: jammy-
-   :suffix: +raspi
+   :suffixes: +raspi
 ```
 
 All supported LTS armhf and arm64 images:
@@ -82,6 +100,15 @@ All supported LTS armhf and arm64 images:
 .. ubuntu-images::
    :archs: armhf, arm64
    :lts-only:
+```
+
+All Xubuntu minimal desktop images from resolute onwards:
+
+```rst
+.. ubuntu-images::
+   :flavor: xubuntu
+   :releases: resolute-
+   :image-types: minimal
 ```
 
 ## Project setup

@@ -9,6 +9,7 @@ from docutils import nodes
 from docutils.statemachine import StringList
 from sphinx_ubuntu_images.ubuntu_images import (
     Image,
+    ImagesNotFoundError,
     Release,
     UbuntuImagesDirective,
     filter_images,
@@ -148,6 +149,35 @@ class TestImage:
         """Test compression extraction."""
         assert sample_image.compression == "xz"
 
+    def test_flavor_property(self, sample_image):
+        """Test flavor extraction."""
+        assert sample_image.flavor == "ubuntu"
+
+    def test_flavor_property_alternate_flavor(self):
+        """Test flavor extraction for a non-default flavor."""
+        image = Image(
+            url="http://cdimage.ubuntu.com/xubuntu/releases/resolute/release/xubuntu-26.04-minimal-amd64.iso",
+            name="xubuntu-26.04-minimal-amd64.iso",
+            date=dt.date(2026, 8, 26),
+            sha256="2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886c678605d1b7f",
+        )
+        assert image.flavor == "xubuntu"
+        assert image.version == "26.04"
+        assert image.image_type == "minimal"
+        assert image.arch == "amd64"
+
+    def test_flavor_property_multi_hyphen(self):
+        """Test flavor extraction for multi-hyphen flavor prefixes."""
+        image = Image(
+            url="http://cdimage.ubuntu.com/releases/noble/release/ubuntu-mate-24.04-desktop-arm64+raspi.img.xz",
+            name="ubuntu-mate-24.04-desktop-arm64+raspi.img.xz",
+            date=dt.date(2024, 8, 27),
+            sha256="5bd01d2a51196587b3fb2899a8f078a2a080278a83b3c8faa91f8daba750d00c",
+        )
+        assert image.flavor == "ubuntu-mate"
+        assert image.version == "24.04"
+        assert image.suffix == "+raspi"
+
 
 class TestFilterReleases:
     """Test the filter_releases function."""
@@ -284,6 +314,20 @@ class TestFilterImages:
         result = filter_images(sample_images, suffixes={"+raspi", ""})
         assert len(result) == 3
 
+    def test_filter_by_flavors(self, sample_images):
+        """Test filtering by flavors."""
+        result = filter_images(sample_images, flavors={"ubuntu"})
+        assert len(result) == 3
+
+    def test_filter_by_flavors_no_match(self, sample_images):
+        """Test filtering by a flavor with no matching images."""
+        result = filter_images(sample_images, flavors={"xubuntu"})
+        assert result == []
+
+    def test_filter_by_flavors_none_includes_all(self, sample_images):
+        """Test that flavors=None includes images of any flavor."""
+        assert list(filter_images(sample_images)) == list(sample_images)
+
     def test_filter_by_regex(self, sample_images):
         """Test filtering by regex pattern."""
         pattern = re.compile(r".*server.*")
@@ -392,3 +436,303 @@ class TestUbuntuImagesDirective:
             "cannot specify both :suffix: and :suffixes: options",
             line=mock_directive.lineno,
         )
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_with_flavor(self, mock_get_images, mock_get_releases, mock_directive):
+        """Test that :flavor: customizes heading, filtering and default URL."""
+        mock_get_releases.return_value = [
+            Release(
+                codename="noble",
+                name="Noble Numbat",
+                version="24.04 LTS",
+                date=dt.datetime(2024, 4, 25, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            )
+        ]
+        mock_get_images.return_value = [
+            Image(
+                url="http://example.com/xubuntu-24.04-desktop-amd64.iso",
+                name="xubuntu-24.04-desktop-amd64.iso",
+                date=dt.date(2024, 4, 25),
+                sha256="abcd1234" * 8,
+            ),
+            Image(
+                url="http://example.com/ubuntu-24.04-desktop-amd64.iso",
+                name="ubuntu-24.04-desktop-amd64.iso",
+                date=dt.date(2024, 4, 25),
+                sha256="efgh5678" * 8,
+            ),
+        ]
+        mock_directive.options = {"flavor": "xubuntu"}
+
+        result = mock_directive.run()
+
+        assert len(result) == 1
+        assert isinstance(result[0], nodes.bullet_list)
+        # Heading uses the flavor title
+        assert result[0][0][0].astext() == "Xubuntu 24.04 LTS (Noble Numbat) images:"
+        # Only xubuntu images listed (flavors passed through to filter_images)
+        image_items = result[0][0][1]
+        assert [item.astext() for item in image_items.children] == [
+            "xubuntu-24.04-desktop-amd64.iso"
+        ]
+        # Flavor-aware default cdimage URL used
+        mock_get_images.assert_called_once_with(
+            url="https://cdimage.ubuntu.com/xubuntu/releases/noble/release/",
+            supported=True,
+        )
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_flavor_xubuntu_default_url(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that :flavor: changes the default cdimage URL."""
+        mock_get_releases.return_value = [
+            Release(
+                codename="noble",
+                name="Noble Numbat",
+                version="24.04 LTS",
+                date=dt.datetime(2024, 4, 25, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            )
+        ]
+        mock_get_images.return_value = []
+        mock_directive.options = {"flavor": "xubuntu", "empty": "none"}
+
+        mock_directive.run()
+
+        mock_get_images.assert_called_once_with(
+            url="https://cdimage.ubuntu.com/xubuntu/releases/noble/release/",
+            supported=True,
+        )
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_with_flavor_titles(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that headings use known flavor display titles."""
+        mock_get_releases.return_value = [
+            Release(
+                codename="noble",
+                name="Noble Numbat",
+                version="24.04 LTS",
+                date=dt.datetime(2024, 4, 25, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            )
+        ]
+        mock_directive.options = {"flavor": "ubuntustudio"}
+        mock_get_images.return_value = [
+            Image(
+                url="http://example.com/ubuntustudio-24.04-desktop-amd64.iso",
+                name="ubuntustudio-24.04-desktop-amd64.iso",
+                date=dt.date(2024, 4, 25),
+                sha256="abcd1234" * 8,
+            )
+        ]
+
+        result = mock_directive.run()
+
+        assert result[0][0][0].astext() == (
+            "Ubuntu Studio 24.04 LTS (Noble Numbat) images:"
+        )
+
+        mock_directive.options = {"flavor": "ubuntu-mate"}
+        mock_get_images.return_value = [
+            Image(
+                url="http://example.com/ubuntu-mate-24.04-desktop-amd64.iso",
+                name="ubuntu-mate-24.04-desktop-amd64.iso",
+                date=dt.date(2024, 4, 25),
+                sha256="efgh5678" * 8,
+            )
+        ]
+
+        result = mock_directive.run()
+
+        assert result[0][0][0].astext() == (
+            "Ubuntu MATE 24.04 LTS (Noble Numbat) images:"
+        )
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_flavor_cdimage_template_override(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that explicit :cdimage-template: beats the flavor default."""
+        mock_get_releases.return_value = [
+            Release(
+                codename="noble",
+                name="Noble Numbat",
+                version="24.04 LTS",
+                date=dt.datetime(2024, 4, 25, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            )
+        ]
+        mock_get_images.return_value = []
+        mock_directive.options = {
+            "flavor": "xubuntu",
+            "cdimage-template": "https://example.com/{release.codename}/",
+            "empty": "none",
+        }
+
+        mock_directive.run()
+
+        mock_get_images.assert_called_once_with(
+            url="https://example.com/noble/", supported=True
+        )
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_without_flavor_defaults_to_ubuntu(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that omitting :flavor: keeps current behavior unchanged."""
+        mock_get_releases.return_value = [
+            Release(
+                codename="noble",
+                name="Noble Numbat",
+                version="24.04 LTS",
+                date=dt.datetime(2024, 4, 25, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            )
+        ]
+        mock_get_images.return_value = []
+        mock_directive.options = {"empty": "none"}
+
+        mock_directive.run()
+
+        mock_get_images.assert_called_once_with(
+            url="https://cdimage.ubuntu.com/releases/noble/release/",
+            supported=True,
+        )
+
+    def test_flavor_option_empty_value(self):
+        """Test that :flavor: with no value converts to an empty string."""
+        assert (
+            UbuntuImagesDirective.option_spec["flavor"](None)  # pyright: ignore[reportOptionalSubscript, reportArgumentType]
+            == ""
+        )
+        assert (
+            UbuntuImagesDirective.option_spec["flavor"](  # pyright: ignore[reportOptionalSubscript]
+                " Xubuntu "
+            )
+            == "xubuntu"
+        )
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_with_empty_flavor_value(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that an empty :flavor: value falls back to the default."""
+        mock_get_releases.return_value = [
+            Release(
+                codename="noble",
+                name="Noble Numbat",
+                version="24.04 LTS",
+                date=dt.datetime(2024, 4, 25, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            )
+        ]
+        mock_get_images.return_value = []
+        mock_directive.options = {"flavor": "", "empty": "none"}
+
+        mock_directive.run()
+
+        mock_get_images.assert_called_once_with(
+            url="https://cdimage.ubuntu.com/releases/noble/release/",
+            supported=True,
+        )
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_flavor_skips_missing_release_dirs(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that releases missing from a flavor's tree are skipped."""
+        mock_get_releases.return_value = [
+            Release(
+                codename="trusty",
+                name="Trusty Tahr",
+                version="14.04 LTS",
+                date=dt.datetime(2014, 4, 17, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            ),
+            Release(
+                codename="noble",
+                name="Noble Numbat",
+                version="24.04 LTS",
+                date=dt.datetime(2024, 4, 25, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            ),
+        ]
+
+        def get_images(url, supported):
+            if "trusty" in url:
+                raise ImagesNotFoundError(
+                    f"unable to get {url}; are you sure the path is correct?"
+                )
+            return [
+                Image(
+                    url="http://example.com/xubuntu-24.04-desktop-amd64.iso",
+                    name="xubuntu-24.04-desktop-amd64.iso",
+                    date=dt.date(2024, 4, 25),
+                    sha256="abcd1234" * 8,
+                )
+            ]
+
+        mock_get_images.side_effect = get_images
+        mock_directive.options = {"flavor": "xubuntu"}
+
+        result = mock_directive.run()
+
+        assert len(result) == 1
+        assert result[0][0][0].astext() == "Xubuntu 24.04 LTS (Noble Numbat) images:"
+        assert mock_get_images.call_count == 2
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_flavor_explicit_template_missing_dir_raises(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that missing dirs stay fatal with an explicit template."""
+        mock_get_releases.return_value = [
+            Release(
+                codename="noble",
+                name="Noble Numbat",
+                version="24.04 LTS",
+                date=dt.datetime(2024, 4, 25, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            )
+        ]
+        mock_get_images.side_effect = ImagesNotFoundError("unable to get")
+        mock_directive.options = {
+            "flavor": "xubuntu",
+            "cdimage-template": "https://example.com/{release.codename}/",
+        }
+
+        with pytest.raises(ImagesNotFoundError):
+            mock_directive.run()
+
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_releases")
+    @patch("sphinx_ubuntu_images.ubuntu_images.get_images")
+    def test_run_ubuntu_missing_dir_raises(
+        self, mock_get_images, mock_get_releases, mock_directive
+    ):
+        """Test that missing dirs stay fatal for the default flavor."""
+        mock_get_releases.return_value = [
+            Release(
+                codename="noble",
+                name="Noble Numbat",
+                version="24.04 LTS",
+                date=dt.datetime(2024, 4, 25, tzinfo=dt.timezone.utc),
+                upgradable=True,
+            )
+        ]
+        mock_get_images.side_effect = ImagesNotFoundError("unable to get")
+        mock_directive.options = {}
+
+        with pytest.raises(ImagesNotFoundError):
+            mock_directive.run()
