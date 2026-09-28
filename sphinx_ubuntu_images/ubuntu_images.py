@@ -542,7 +542,7 @@ def get_releases(
     tuples corresponding to all Ubuntu releases. For example::
 
         >>> with _test_server(_make_releases()) as url:
-        ...     releases = get_releases([url + 'meta-release'])
+        ...     releases = get_releases((url + 'meta-release',))
         >>> len(releases)
         4
         >>> releases[0] # doctest: +NORMALIZE_WHITESPACE +ELLIPSIS
@@ -581,7 +581,7 @@ def filter_releases(
     options. For example::
 
         >>> with _test_server(_make_releases()) as url:
-        ...     releases = get_releases([url + 'meta-release'])
+        ...     releases = get_releases((url + 'meta-release',))
         >>> [r.codename for r in releases]
         ['warty', 'disco', 'jammy', 'noble']
         >>> [r.codename for r in filter_releases(releases, spec='disco-')]
@@ -1155,7 +1155,7 @@ __test__ = {
             get_images(wrong_url) # doctest: +ELLIPSIS
           File ".../downloads.py", line 370, in get_images
             raise ImagesNotFoundError(...)
-        ImagesNotFoundError: unable to get http://...; are you sure the path is correct?
+        sphinx_ubuntu_images.ubuntu_images.ImagesNotFoundError: unable to get http://...; are you sure the path is correct?
     """,
     "no-checksums": """
     The SHA256SUMS file must exist on the server::
