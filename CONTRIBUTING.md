@@ -117,8 +117,6 @@ name as `<ticket-id>-<description>`. For example, if you're working on GitHub is
 \#235, and it's about adding a string sanitizer, you'd name your branch
 `issue-235-add-string-sanitizer-method`.
 
-````
-
 ### Commit a change
 
 Once you've made the changes to the code and you're ready to test it, start by
@@ -127,7 +125,7 @@ committing:
 ```bash
 git add -A
 git commit
-````
+```
 
 Format the commit message according to the [Conventional
 Commits](https://www.conventionalcommits.org/en/v1.0.0/) style. For the sanitizer
