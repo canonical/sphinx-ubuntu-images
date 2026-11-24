@@ -6,6 +6,19 @@ from pathlib import Path
 
 import bs4
 import pytest
+from sphinx_ubuntu_images.ubuntu_images import (
+    _make_index,  # pyright: ignore[reportPrivateUsage]
+    _make_releases,  # pyright: ignore[reportPrivateUsage]
+    _make_sums,  # pyright: ignore[reportPrivateUsage]
+    _test_server,  # pyright: ignore[reportPrivateUsage]
+)
+
+# Images served by the fake cdimage site. Jammy is marked upgradable in the fake
+# meta-release, so it always counts as supported, whatever today's date is.
+FAKE_IMAGES = {
+    "releases/jammy/release/ubuntu-22.04.5-live-server-amd64.iso": b"jammy" * 1024,
+    "releases/noble/release/ubuntu-24.04-live-server-arm64.iso": b"noble" * 1024,
+}
 
 
 @pytest.fixture
@@ -22,9 +35,31 @@ def example_project(request) -> Path:
     return target_dir
 
 
+@pytest.fixture
+def fake_site_options():
+    """Serve fake changelogs and cdimage content on localhost.
+
+    The build then doesn't depend on changelogs.ubuntu.com or cdimage.ubuntu.com
+    being reachable. Yields the directive options that point at the fake site.
+    """
+    files = {**_make_releases(), **_make_index(_make_sums(FAKE_IMAGES))}
+    with _test_server(files) as url:
+        yield (
+            f"   :meta-release: {url}meta-release\n"
+            f"   :meta-release-development: {url}meta-release-development\n"
+            f"   :cdimage-template: {url}releases/{{release.codename}}/release/\n"
+        )
+
+
 @pytest.mark.slow
-def test_ubuntu_images_integration(example_project):
+def test_ubuntu_images_integration(example_project, fake_site_options):
     """Test that the ubuntu-images directive works end-to-end."""
+    index_rst = example_project / "index.rst"
+    index_rst.write_text(
+        index_rst.read_text().replace(
+            ".. ubuntu-images::\n", ".. ubuntu-images::\n" + fake_site_options
+        )
+    )
     build_dir = example_project / "_build"
 
     # Run sphinx-build to generate HTML
@@ -53,29 +88,16 @@ def test_ubuntu_images_integration(example_project):
     if example_project.exists():
         shutil.rmtree(example_project)
 
-    # Look for the directive output - either image lists or empty message
-    # The directive should either generate a bullet list of images or an emphasis with empty message
-    bullet_lists = soup.find_all("ul")
-    emphasis_tags = soup.find_all("em")
-
-    # At least one of these should be present
-    has_bullet_list = any("ubuntu-" in str(ul) for ul in bullet_lists)
-    has_empty_message = any(
-        "empty" in str(em).lower() or "available" in str(em).lower()
-        for em in emphasis_tags
-    )
-
-    if not (has_bullet_list or has_empty_message):
-        # For debugging, let's see what we actually got
+    # The jammy image from the fake site should be listed as a download link
+    links = [a.get_text() for a in soup.find_all("a")]
+    if "ubuntu-22.04.5-live-server-amd64.iso" not in links:
         print("Generated HTML:")
         print(soup.prettify())
-        pytest.fail(
-            "Expected either Ubuntu image links or an empty message, but found neither"
-        )
+        pytest.fail("Expected the jammy image from the fake cdimage site")
 
 
 @pytest.mark.slow
-def test_ubuntu_images_with_empty_option(example_project):
+def test_ubuntu_images_with_empty_option(example_project, fake_site_options):
     """Test that the ubuntu-images directive handles the empty option correctly."""
     # Modify the example to use the empty option
     index_rst = example_project / "index.rst"
@@ -84,7 +106,10 @@ def test_ubuntu_images_with_empty_option(example_project):
     # Replace the entire directive block with one that has unlikely filters
     new_content = content.replace(
         ".. ubuntu-images::\n   :empty: No Ubuntu images available at this time",
-        ".. ubuntu-images::\n   :releases: nonexistent-release\n   :empty: No images found for the specified criteria",
+        ".. ubuntu-images::\n"
+        + fake_site_options
+        + "   :releases: nonexistent-release\n"
+        "   :empty: No images found for the specified criteria",
     )
     index_rst.write_text(new_content)
 
