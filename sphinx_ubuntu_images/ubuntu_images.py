@@ -989,12 +989,12 @@ def _make_releases() -> dict[str, bytes]:  # pyright: ignore[reportUnusedFunctio
     found on https://changelogs.ubuntu.com/
     """
     releases = [
-        ("Warty Warthog", "04.10", "2004-10-20T07:28:17Z", False),
-        ("Disco Dingo", "19.04", "2019-04-18T19:04:00Z", False),
-        ("Jammy Jellyfish", "22.04.5 LTS", "2022-04-21T22:04:00Z", True),
+        ("Warty Warthog", "04.10", "2004-10-20T07:28:17+00:00", False),
+        ("Disco Dingo", "19.04", "2019-04-18T19:04:00+00:00", False),
+        ("Jammy Jellyfish", "22.04.5 LTS", "2022-04-21T22:04:00+00:00", True),
         # Noble has upgradable=False to test that it still counts as supported
         # (case where an LTS is not yet upgradable before the first point-release)
-        ("Noble Numbat", "24.04 LTS", "2024-04-25T00:24:04Z", False),
+        ("Noble Numbat", "24.04 LTS", "2024-04-25T00:24:04+00:00", False),
     ]
 
     paras: list[str] = []
